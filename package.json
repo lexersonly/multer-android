@@ -1,0 +1,30 @@
+{
+  "name": "multer-android",
+  "version": "0.3.0",
+  "description": "Multer no terminal, para rodar dentro do Termux",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "multer": "bin/multer.js"
+  },
+  "scripts": {
+    "start": "node bin/multer.js",
+    "typecheck": "tsc",
+    "test": "node --test \"test/*.test.ts\"",
+    "check": "tsc && node --test \"test/*.test.ts\""
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "dependencies": {
+    "ink": "8.0.0",
+    "rea-agents": "6.8.0",
+    "react": "19.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "24",
+    "@types/react": "19.3.0",
+    "typescript": "7.0.2"
+  }
+}

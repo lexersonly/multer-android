@@ -1,0 +1,12 @@
+node_modules/
+.cache/
+*.log
+.DS_Store
+
+# Credenciais nunca entram no repositório.
+.env
+.env.*
+credential
+*.pem
+*.key
+.git-credentials
