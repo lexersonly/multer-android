@@ -7,7 +7,9 @@ import { inPath } from './auth/browser.ts';
 import { loadCredential } from './auth/credentials.ts';
 import { nodeMeetsRea, Plugins, REA_VERSION, reaScript } from './plugins/plugins.ts';
 import { loadSettings } from './plugins/settings.ts';
+import { attachPhone } from './phone.ts';
 import { baseUrlFor, DEFAULT_MODEL } from './provider/client.ts';
+import { sessionPath } from './session.ts';
 import { checkForUpdate, localVersion, runUpdate } from './update.ts';
 
 const USAGE = `multer                abre a interface na pasta atual
@@ -22,6 +24,8 @@ async function doctor(startRea: boolean): Promise<number> {
   console.log(`Node ${process.version} em ${process.platform}/${process.arch}`);
   console.log(`Abrir navegador: ${inPath('termux-open-url') ? 'termux-open-url' : inPath('xdg-open') ? 'xdg-open' : 'nada encontrado (o endereço aparece na tela)'}`);
   console.log(`Login: ${credential ? `salvo (usa ${baseUrlFor(credential)})` : 'ainda não'}`);
+  console.log(`Manter acordado: ${inPath('termux-wake-lock') ? 'termux-wake-lock' : 'indisponível fora do Termux'}`);
+  console.log(`Avisos no celular: ${inPath('termux-notification') ? 'sim' : 'não (pkg install termux-api e o app Termux:API)'}`);
   console.log(`REA ${REA_VERSION} instalado: ${existsSync(reaScript()) ? 'sim' : 'não'}`);
   console.log(`Node atende ao REA: ${nodeMeetsRea() ? 'sim' : 'não (exige ^22.23.4, ^24.22.1 ou >=26.12.1)'}`);
   console.log(`REA autorizado: ${loadSettings().reaEnabled ? 'sim' : 'não (desligado até você autorizar)'}`);
@@ -78,12 +82,14 @@ async function main(): Promise<number> {
 
   const root = realpathSync(process.cwd());
   const plugins = new Plugins();
+  const print = args.indexOf('-p');
   const runtime = new Runtime({
     root,
     plugins,
     getCredential: loadCredential,
     model: loadSettings().model ?? DEFAULT_MODEL,
     approve: async () => 'no',
+    sessionFile: print >= 0 ? undefined : sessionPath(root),
   });
 
   // Fechar o terminal ou Ctrl+C não pode deixar um bot rodando escondido.
@@ -91,7 +97,6 @@ async function main(): Promise<number> {
   process.on('SIGHUP', () => process.exit(129));
   process.on('SIGTERM', () => process.exit(143));
 
-  const print = args.indexOf('-p');
   if (print >= 0) {
     const prompt = args[print + 1];
     if (!prompt) {
@@ -117,8 +122,11 @@ async function main(): Promise<number> {
   }
   const { render } = await import('ink');
   const { App } = await import('./ui/app.ts');
+  const releasePhone = attachPhone(runtime);
+  process.on('exit', releasePhone);
   const app = render(createElement(App, { runtime, plugins, root }));
   await app.waitUntilExit();
+  releasePhone();
   runtime.shutdown();
   plugins.close();
   return 0;

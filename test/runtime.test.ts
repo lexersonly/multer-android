@@ -89,12 +89,12 @@ before(async () => {
 
 after(() => server.close());
 
-function setup({ approve = async () => 'yes', plugins, leadTimeoutMs }: { approve?: Approver; plugins?: Plugins; leadTimeoutMs?: number } = {}) {
+function setup({ approve = async () => 'yes', plugins, leadTimeoutMs, sessionFile }: { approve?: Approver; plugins?: Plugins; leadTimeoutMs?: number; sessionFile?: string } = {}) {
   script = [];
   requests = [];
   const root = mkdtempSync(join(tmpdir(), 'multer-projeto-'));
   const lines: UiLine[] = [];
-  const runtime = new Runtime({ root, plugins, getCredential: () => 'sk_teste', model: 'm', maxTokens: 100, approve, leadTimeoutMs });
+  const runtime = new Runtime({ root, plugins, getCredential: () => 'sk_teste', model: 'm', maxTokens: 100, approve, leadTimeoutMs, sessionFile });
   runtime.on('line', (line) => lines.push(line));
   return { root, runtime, lines };
 }
@@ -196,11 +196,14 @@ test('papel limita ferramenta: o líder não grava', async () => {
 });
 
 test('modelo preso é encerrado pelo detector de repetição', async () => {
-  const { runtime, lines } = setup();
+  const { runtime, lines, root } = setup();
+  writeFileSync(join(root, 'a.txt'), 'oi');
   const same = tool('read_file', { path: 'a.txt' });
-  script = [same, same, same];
+  script = [same, same, same, same, same, same];
   await runtime.send('leia');
   assert.ok(lines.some((line) => /repetiu a mesma chamada/.test(textOf(line))));
+  assert.match(requests[3].body.messages.at(-1)?.content ?? '', /repetiu a mesma chamada/, 'avisa antes de encerrar');
+  assert.equal(lines.filter((line) => line.type === 'tool').length, 1, 'o que já foi lido não roda de novo');
 });
 
 test('erro 401 orienta o login e não mostra a chave', async () => {
@@ -427,4 +430,77 @@ test('modelo que existe mas dá "not found": tenta de novo e mostra qual modelo'
   await runtime.send('oi');
   const error = textOf(lines.find((line) => line.type === 'error'));
   assert.match(error, /modelo community\/x\/m-free/);
+});
+
+test('o que foi lido continua na nota depois de várias leituras', async () => {
+  const { runtime, root } = setup();
+  for (const name of ['um.txt', 'dois.txt', 'tres.txt', 'quatro.txt']) writeFileSync(join(root, name), `conteudo-${name}`);
+  script = [
+    tool('assign_task', { title: 'X', assignee: 'desenvolvedor' }), 'Entregue.',
+    tool('read_file', { path: 'um.txt' }), tool('read_file', { path: 'dois.txt' }), tool('read_file', { path: 'tres.txt' }), tool('read_file', { path: 'quatro.txt' }),
+    tool('write_file', { path: 'a.txt', content: 'x' }), tool('update_task', { status: 'completed', result: 'ok' }),
+    tool('submit_review', { approved: true, summary: 'ok' }), tool('update_task', { status: 'completed', result: 'ok' }), 'Fim.',
+  ];
+  await runtime.send('faça');
+  const afterReads = requests[6].body.messages.at(-1)?.content ?? '';
+  assert.ok(afterReads.includes('conteudo-um.txt'), 'o primeiro lido não some');
+  assert.ok(afterReads.includes('conteudo-quatro.txt'));
+});
+
+test('desenvolvedor que só fala não conclui: a tarefa volta e depois fica como não concluída', async () => {
+  const { runtime, lines } = setup();
+  script = [
+    tool('assign_task', { title: 'X', assignee: 'desenvolvedor' }), 'Entregue.',
+    'Primeira fala do dev.', 'Segunda fala do dev.', 'Terceira fala do dev.',
+    'Quarta fala do dev.', 'Quinta fala do dev.', 'Sexta fala do dev.',
+    'Não consegui.',
+  ];
+  await runtime.send('faça');
+  assert.equal(runtime.tasks[0].status, 'blocked');
+  assert.ok(lines.some((line) => /A tarefa voltou/.test(textOf(line))));
+  assert.ok(lines.some((line) => /Digite continua/.test(textOf(line))));
+});
+
+test('"continua" devolve a tarefa aberta ao responsável, sem passar pelo arquiteto', async () => {
+  const { runtime, lines } = setup();
+  script = [
+    tool('assign_task', { title: 'Criar site', assignee: 'desenvolvedor' }), 'Entregue.',
+    'Primeira fala do dev.', 'Segunda fala do dev.', 'Terceira fala do dev.',
+    'Quarta fala do dev.', 'Quinta fala do dev.', 'Sexta fala do dev.',
+    'Não consegui.',
+  ];
+  await runtime.send('faça');
+  const before = requests.length;
+  script = [tool('write_file', { path: 'a.txt', content: 'x' }), tool('update_task', { status: 'completed', result: 'ok' }), tool('submit_review', { approved: true, summary: 'ok' }), tool('update_task', { status: 'completed', result: 'ok' }), 'Fim.'];
+  await runtime.send('continua ai a tarefa');
+  assert.match(requests[before].body.messages.at(-1)?.content ?? '', /Sua tarefa t1: Criar site/);
+  assert.equal(runtime.tasks[0].status, 'completed');
+  assert.ok(lines.some((line) => /Retomando "Criar site"/.test(textOf(line))));
+});
+
+test('resposta presa numa frase é cortada, e a tela mostra uma cópia', async () => {
+  const { runtime, lines } = setup();
+  script = [{ text: 'Vou olhar a cotação de hoje agora mesmo. '.repeat(30) }, 'Pronto.'];
+  await runtime.send('oi');
+  const said = lines.filter((line) => line.type === 'agent').map(textOf);
+  assert.equal(said[0].match(/cotação/g)?.length, 1);
+});
+
+test('a conversa salva volta depois de fechar, em arquivo privado', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'multer-sessao-'));
+  const sessionFile = join(dir, 'sessoes', 'a.json');
+  const first = setup({ sessionFile });
+  script = ['Olá, tudo certo por aqui.'];
+  await first.runtime.send('oi');
+  assert.equal(statSync(sessionFile).mode & 0o777, 0o600);
+  const second = setup({ sessionFile });
+  assert.equal(second.runtime.savedSession()?.items, 2);
+  assert.equal(second.runtime.restoreSession(), 0);
+  script = ['Lembrei.'];
+  await second.runtime.send('e agora?');
+  assert.ok(JSON.stringify(requests.at(-1)?.body.messages).includes('Olá, tudo certo por aqui.'));
+  second.runtime.clear();
+  assert.equal(second.runtime.savedSession(), null);
+  writeFileSync(sessionFile, 'isto não é json');
+  assert.equal(setup({ sessionFile }).runtime.savedSession(), null, 'arquivo quebrado não impede abrir');
 });

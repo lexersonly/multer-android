@@ -10,9 +10,11 @@ import { loadCredential } from '../auth/credentials.ts';
 import { saveSecret } from '../auth/secrets.ts';
 import { saveToken } from '../auth/token-login.ts';
 import type { Plugins } from '../plugins/plugins.ts';
-import { checkForUpdate } from '../update.ts';
+import { notify } from '../phone.ts';
+import { checkForUpdate, localVersion } from '../update.ts';
 import type { Agent, ApprovalAnswer, ApprovalRequest, UiLine } from '../types.ts';
 import { type CommandContext, type PasteTarget, runCommand, suggest } from './commands.ts';
+import { deleteBefore, deleteWord, EMPTY_INPUT, insert, inputAt, type InputState, move, splitAtCursor } from './input.ts';
 import { Markdown } from './markdown.ts';
 import { shortName } from './models.ts';
 import { agentColor, SPINNER, THEME, toolLabel } from './theme.ts';
@@ -23,22 +25,34 @@ type PasteState = PasteTarget & { reason?: string };
 
 const MAX_SUGGESTIONS = 6;
 const MAX_MODEL_WIDTH = 22;
+const STAGES = ['desenvolvedor', 'revisor', 'testador'];
 
 function Banner({ line }: { line: Extract<UiLine, { type: 'banner' }> }): ReactElement {
   return h(Box, { flexDirection: 'column' },
-    h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: THEME.accent, paddingX: 1 },
-      h(Text, { bold: true }, h(Text, { color: THEME.accent }, '✻ '), 'Bem-vindo ao Multer!'),
-      h(Text, { color: THEME.muted }, 'Welcome to Multer · equipe de agentes'),
-      h(Box, { marginTop: 1, flexDirection: 'column' },
-        h(Text, { color: THEME.muted, wrap: 'truncate-middle' }, `  pasta  ${line.root}`),
-        h(Text, { color: THEME.muted, wrap: 'truncate-end' }, `  modelo ${shortName(line.model)}`))),
-    h(Box, { flexDirection: 'column', marginTop: 1, paddingX: 1 },
-      h(Text, { color: THEME.muted }, 'Para começar:'),
-      h(Text, null, ' 1. Escreva o que quer criar e aperte Enter'),
-      h(Text, null, ' 2. ', h(Text, { color: THEME.accent }, '/'), ' mostra os comandos · shows commands'),
-      h(Text, null, ' 3. ', h(Text, { color: THEME.accent }, '@revisor'), ' fala direto com um agente'),
-      h(Box, { marginTop: 1, flexWrap: 'wrap' },
-        ...TEAM.map((agent) => h(Text, { key: agent.id, color: agentColor(agent.id) }, `● ${agent.name}  `)))));
+    h(Text, null, h(Text, { color: THEME.accent, bold: true }, '✻ Multer'), h(Text, { color: THEME.muted }, ` ${localVersion()} · equipe de agentes`)),
+    h(Text, { color: THEME.muted, wrap: 'truncate-middle' }, line.root),
+    h(Box, { flexWrap: 'wrap', marginTop: 1 },
+      ...TEAM.map((agent) => h(Text, { key: agent.id, color: agentColor(agent.id) }, `● ${agent.name}  `))),
+    h(Text, { color: THEME.muted }, 'Escreva o pedido. ',
+      h(Text, { color: THEME.accent }, '/'), ' comandos, ',
+      h(Text, { color: THEME.accent }, '@revisor'), ' fala com um agente.'));
+}
+
+/** Onde o pedido está: quem já passou, quem trabalha agora e quem falta. */
+function Progress({ runtime, active, narrow }: { runtime: Runtime; active: string | null; narrow: boolean }): ReactElement | null {
+  if (!runtime.tasks.length) return null;
+  const files = runtime.files.length;
+  return h(Box, { marginTop: 1 },
+    h(Text, { wrap: 'truncate-end' },
+      ...STAGES.flatMap((id, index) => {
+        const agent = TEAM.find((member) => member.id === id) as Agent;
+        const tasks = runtime.tasks.filter((task) => task.assignee === id);
+        const last = tasks.at(-1);
+        const mark = active === id ? '●' : last?.status === 'completed' ? '✓' : last?.status === 'blocked' ? '✗' : '○';
+        const color = active === id ? agentColor(id) : last?.status === 'completed' ? THEME.ok : last?.status === 'blocked' ? THEME.bad : THEME.muted;
+        return [index ? h(Text, { key: `sep${id}`, color: THEME.muted }, ' › ') : null, h(Text, { key: id, color }, `${mark} ${narrow && id === 'desenvolvedor' ? 'Dev' : agent.name}`)];
+      }),
+      files ? h(Text, { color: THEME.muted }, `  ${files} arq.`) : null));
 }
 
 function Line({ line }: { line: UiLine }): ReactElement {
@@ -110,7 +124,8 @@ export function App({ runtime, plugins, root }: AppProps): ReactElement {
   const [live, setLive] = useState<{ agent: Agent; text: string } | null>(null);
   const [state, setState] = useState<{ agent: Agent; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
-  const [value, setValue] = useState('');
+  const [input, setInput] = useState<InputState>(EMPTY_INPUT);
+  const value = input.text;
   const [approval, setApproval] = useState<PendingApproval | null>(null);
   const [paste, setPaste] = useState<PasteState | null>(null);
   const [working, setWorking] = useState<string | null>(null);
@@ -141,11 +156,16 @@ export function App({ runtime, plugins, root }: AppProps): ReactElement {
     runtime.on('state', setState);
     runtime.on('busy', setBusy);
     runtime.on('model', setModel);
-    runtime.approve = (request) => new Promise((resolve) => setApproval({ ...request, resolve }));
+    runtime.approve = (request) => new Promise((resolve) => {
+      notify('Multer', `${request.agent.name} pede permissão: ${request.reason}`);
+      setApproval({ ...request, resolve });
+    });
     runtime.askSecret = (name, reason) => new Promise((resolve) => setPaste({ kind: 'secret', name, reason, resolve }));
 
     add({ type: 'banner', root, model: runtime.model });
     if (!loadCredential()) note('Sem login ainda: digite /login e cole o token do APK Multer Token.');
+    const saved = runtime.savedSession();
+    if (saved) note(`Há uma conversa salva nesta pasta${saved.openTasks ? `, com ${saved.openTasks} tarefa(s) aberta(s)` : ''}. Digite /retomar para voltar a ela.`);
     if (!process.env.MULTER_NO_UPDATE_CHECK) {
       void checkForUpdate().then((found) => {
         if (found?.available) note(`Versão nova: ${found.current} → ${found.latest}. Digite /atualizar.`);
@@ -210,7 +230,7 @@ export function App({ runtime, plugins, root }: AppProps): ReactElement {
 
   const submit = (): void => {
     const text = value.trim();
-    setValue('');
+    setInput(EMPTY_INPUT);
     if (paste) return submitPaste(paste, text);
     if (!text) return;
     rememberSent(text);
@@ -223,9 +243,9 @@ export function App({ runtime, plugins, root }: AppProps): ReactElement {
     void runtime.send(text).catch((err: Error) => error(err.message));
   };
 
-  useInput((input, key) => {
+  useInput((typed, key) => {
     if (approval) {
-      const answer = input.toLowerCase();
+      const answer = typed.toLowerCase();
       const pick: ApprovalAnswer | null = answer === 's' || answer === 'y' ? 'yes'
         : answer === 'n' || key.escape ? 'no'
           : (answer === 't' || answer === 'a') && approval.offerAlways ? 'always' : null;
@@ -240,7 +260,7 @@ export function App({ runtime, plugins, root }: AppProps): ReactElement {
       if (paste) {
         if (paste.kind === 'secret') paste.resolve?.(null);
         setPaste(null);
-        setValue('');
+        setInput(EMPTY_INPUT);
         return;
       }
       loginAbort.current?.abort();
@@ -249,33 +269,39 @@ export function App({ runtime, plugins, root }: AppProps): ReactElement {
     }
     if (key.return) return submit();
     if (key.tab) {
-      if (matches.length) setValue(`/${matches[0].names[0]} `);
+      if (matches.length) setInput(inputAt(`/${matches[0].names[0]} `));
       return;
     }
-    if (key.backspace || key.delete) return setValue((old) => old.slice(0, -1));
-    if (key.ctrl && input === 'u') return setValue('');
+    if (key.backspace || key.delete) return setInput(deleteBefore);
+    if (key.ctrl && typed === 'u') return setInput(EMPTY_INPUT);
+    if (key.ctrl && typed === 'w') return setInput(deleteWord);
+    if (key.ctrl && typed === 'a') return setInput((old) => ({ ...old, cursor: 0 }));
+    if (key.ctrl && typed === 'e') return setInput((old) => inputAt(old.text));
+    if (key.leftArrow) return setInput((old) => move(old, -1));
+    if (key.rightArrow) return setInput((old) => move(old, 1));
     if (key.upArrow && !paste) {
-      if (sentAt.current > 0) setValue(sent.current[--sentAt.current]);
+      if (sentAt.current > 0) setInput(inputAt(sent.current[--sentAt.current]));
       return;
     }
     if (key.downArrow && !paste) {
-      if (sentAt.current < sent.current.length) setValue(sent.current[++sentAt.current] ?? '');
+      if (sentAt.current < sent.current.length) setInput(inputAt(sent.current[++sentAt.current] ?? ''));
       return;
     }
-    if (input && !key.ctrl && !key.meta) {
+    if (typed && !key.ctrl && !key.meta) {
       // Colar várias linhas não pode enviar a mensagem no meio.
-      setValue((old) => old + input.replace(/\r\n?|\n/g, ' '));
+      setInput((old) => insert(old, typed.replace(/\r\n?|\n/g, ' ')));
     }
   });
 
   const rows = (stdout as NodeJS.WriteStream | undefined)?.rows ?? 24;
+  const columns = (stdout as NodeJS.WriteStream | undefined)?.columns ?? 80;
   // Só o fim do texto em andamento: desenhar mais que a tela faz o terminal piscar.
   const liveTail = useMemo(() => {
     if (!live?.text) return '';
     return live.text.split('\n').slice(-Math.max(rows - 10, 4)).join('\n');
   }, [live, rows]);
   // O tamanho do segredo também não aparece.
-  const shownValue = paste ? (value ? '••••••••' : '') : value;
+  const [beforeCursor, underCursor, afterCursor] = paste ? [value ? '••••••••' : '', ' ', ''] : splitAtCursor(input);
   const promptLabel = paste ? (paste.kind === 'token' ? 'token' : paste.name) : null;
   const activity = working ?? (state ? `${state.agent.name} · ${state.text}…` : null);
   const placeholder = 'Peça algo à equipe · Ask the team';
@@ -287,6 +313,7 @@ export function App({ runtime, plugins, root }: AppProps): ReactElement {
         h(Text, null, h(Text, { color: agentColor(live.agent.id) }, '● '), h(Text, { bold: true, color: agentColor(live.agent.id) }, live.agent.name)),
         h(Box, { paddingLeft: 2 }, h(Markdown, { text: liveTail })))
       : null,
+    busy ? h(Progress, { runtime, active: state?.agent.id ?? null, narrow: columns < 56 }) : null,
     activity ? h(Spinner, { label: activity }) : null,
     paste?.reason ? h(Text, { color: THEME.warn }, paste.reason) : null,
     approval
@@ -306,12 +333,15 @@ export function App({ runtime, plugins, root }: AppProps): ReactElement {
             h(Text, { color: THEME.muted }, 'tab completa'))
           : null,
         h(Box, { borderStyle: 'round', borderColor: paste ? THEME.warn : THEME.muted, paddingX: 1 },
-          h(Text, { wrap: 'truncate-end' },
+          // Quebra a linha em vez de cortar: na tela do celular, o texto longo sumia.
+          h(Text, null,
             h(Text, { color: paste ? THEME.warn : THEME.accent }, promptLabel ? `${promptLabel}> ` : '> '),
-            shownValue,
-            h(Text, { inverse: true }, ' '),
+            beforeCursor,
+            h(Text, { inverse: true }, underCursor),
+            afterCursor,
             !value && !paste ? h(Text, { color: THEME.muted }, placeholder) : null)),
         h(Box, { justifyContent: 'space-between', paddingX: 1 },
-          h(Text, { color: THEME.muted, wrap: 'truncate-end' }, '/ comandos · esc interrompe'),
+          // Em tela estreita, a dica não pode encostar no nome do modelo.
+          h(Text, { color: THEME.muted, wrap: 'truncate-end' }, columns < 56 ? '/ comandos' : '/ comandos · esc interrompe'),
           h(Text, { color: THEME.muted, wrap: 'truncate-end' }, shortName(model).slice(0, MAX_MODEL_WIDTH)))));
 }

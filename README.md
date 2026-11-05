@@ -8,6 +8,16 @@ Uma equipe de agentes de IA no terminal do seu Android. O Multer roda dentro do 
 
 O Multer recebe atualizações toda semana. Para receber, digite `/atualizar`.
 
+**0.4.0**
+- Os agentes guardam o que já leram e param de reler os mesmos arquivos. Quem lê demais sem agir é cobrado e depois precisa fazer a tarefa.
+- Desenvolvedor que só fala não conclui mais a tarefa: ela volta uma vez com o que já foi feito e, se não andar, aparece como não concluída.
+- Digite `continua` e a tarefa aberta volta direto para quem cuida dela.
+- A conversa fica salva por pasta: se o Android fechar o Termux, `/retomar` traz de volta.
+- O Termux fica acordado enquanto a equipe trabalha. Com o Termux:API, o celular avisa quando ela termina ou pede permissão.
+- Caixa de texto com cursor, quebra de linha e emoji que apaga inteiro, e uma linha mostrando em que etapa o pedido está.
+- Modelo preso repetindo a mesma frase é cortado, em vez de gastar a cota.
+- Novos comandos: `/retomar`, `/cancelar` e `/arquivos`.
+
 **0.3.0**
 - A equipe trabalha sozinha: o arquiteto entrega o pedido, e o desenvolvedor, o revisor e o testador seguem em sequência. Se o arquiteto demorar, o pedido vai direto ao desenvolvedor.
 - Atualização pelo próprio Multer, com `/atualizar`, sem repetir a linha de instalação.
@@ -28,6 +38,8 @@ O Multer recebe atualizações toda semana. Para receber, digite `/atualizar`.
 - **Feito para modelos pequenos:** o prompt é curto e o parser entende chamadas de ferramenta malformadas. Respostas cortadas são gravadas em partes.
 - **Bots e servidores:** os agentes rodam processos em segundo plano e guardam tokens sem ver o valor.
 - **Comandos em português e inglês**, com sugestões enquanto você digita.
+- **Conversa salva por pasta:** só neste aparelho, em arquivo privado. `/retomar` volta a ela, e `/limpar` apaga.
+- **Feito para o celular:** mantém o Termux acordado durante o trabalho e, com `pkg install termux-api` e o app Termux:API, avisa quando termina ou pede permissão.
 - **REA incluído:** o plugin de análise vem instalado e fica desligado até você autorizar.
 
 ## Requisitos

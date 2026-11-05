@@ -7,12 +7,14 @@ import { listSecretNames, SECRET_NAME, saveSecret } from '../auth/secrets.ts';
 import type { Plugins } from '../plugins/plugins.ts';
 import { saveSettings } from '../plugins/settings.ts';
 import { chat, type ChatResult, DEFAULT_MODEL, modelIds, type ProviderError } from '../provider/client.ts';
+import { deleteSession, loadSession, saveSession } from '../session.ts';
 import { approvalFor } from '../tools/approval.ts';
 import { isLocalTool, runLocalTool } from '../tools/local.ts';
 import { ProcessManager } from '../tools/processes.ts';
 import type { Agent, Approver, HistoryItem, Task, ToolArgs, ToolCall, ToolOutcome, UiLine } from '../types.ts';
 import { shortName } from '../ui/models.ts';
 import { announcesAction, fingerprint, parseResponse, streamView, toolCallWasCut } from './parser.ts';
+import { asksToContinue, collapseRepeats, composeNote, isReadOnly, streamIsLooping, TurnLedger } from './ledger.ts';
 import { buildContext, buildSystemPrompt, findAgent, leadAgent, mentionedAgent, TEAM } from './team.ts';
 
 const CONTEXT_BUDGET_CHARS = 12_000;
@@ -23,6 +25,10 @@ const MAX_CUT_REPLIES = 3;
 const MAX_BAD_CALLS = 4;
 const MAX_REPEATS = 3;
 const MAX_FIX_ROUNDS = 1;
+/** Cabe no contexto junto com o histórico, que tem o orçamento acima. */
+const TURN_MEMORY_CHARS = 6_000;
+/** Tarefa que parou sem entregar volta uma vez, com o que já foi feito, antes de falhar. */
+const MAX_TASK_RETRIES = 1;
 /** O arquiteto só reparte o trabalho: passou disso, o pedido vai direto ao desenvolvedor. */
 const LEAD_TIMEOUT_MS = 60_000;
 const AGENT_TIMEOUT_MS = 240_000;
@@ -52,8 +58,11 @@ interface Pipeline {
   reviewQueued: boolean;
   testQueued: boolean;
   fixes: number;
+  retries: number;
   closing: boolean;
 }
+
+const newPipeline = (): Pipeline => ({ reviewQueued: false, testQueued: false, fixes: 0, retries: 0, closing: false });
 
 interface RuntimeEvents {
   line: [UiLine];
@@ -73,10 +82,14 @@ export interface RuntimeOptions {
   askSecret?: SecretAsker;
   leadTimeoutMs?: number;
   agentTimeoutMs?: number;
+  /** Onde a conversa fica salva. Sem isto, ela só existe enquanto o Multer está aberto. */
+  sessionFile?: string;
 }
 
 /** Pede o valor à pessoa. Devolve null se ela recusar. */
 export type SecretAsker = (name: string, reason: string) => Promise<string | null>;
+
+const isOpen = (task: Task): boolean => (task.status === 'in_progress' || task.status === 'blocked') && !findAgent(task.assignee)?.lead;
 
 export class Runtime extends EventEmitter<RuntimeEvents> {
   readonly root: string;
@@ -89,12 +102,13 @@ export class Runtime extends EventEmitter<RuntimeEvents> {
   approve: Approver;
   askSecret: SecretAsker;
   readonly processes: ProcessManager;
+  readonly sessionFile?: string;
   tasks: Task[] = [];
   private history: HistoryItem[] = [];
   private queue: QueuedTurn[] = [];
   private delegated = new Set<string>();
   private changedFiles = new Set<string>();
-  private pipeline: Pipeline = { reviewQueued: false, testQueued: false, fixes: 0, closing: false };
+  private pipeline: Pipeline = newPipeline();
   private lastUserText = '';
   private allowAlways = false;
   private controller: AbortController | null = null;
@@ -112,6 +126,7 @@ export class Runtime extends EventEmitter<RuntimeEvents> {
     this.approve = options.approve;
     this.askSecret = options.askSecret ?? (async () => null);
     this.processes = new ProcessManager(options.root);
+    this.sessionFile = options.sessionFile;
   }
 
   /** Ao fechar o Multer, nada fica rodando sozinho. */
@@ -133,6 +148,70 @@ export class Runtime extends EventEmitter<RuntimeEvents> {
     this.queue = [];
     this.allowAlways = false;
     this.nextTask = 1;
+    this.changedFiles = new Set();
+    this.lastUserText = '';
+    if (this.sessionFile) deleteSession(this.sessionFile);
+  }
+
+  /** Arquivos que a equipe alterou no pedido atual. */
+  get files(): string[] {
+    return [...this.changedFiles];
+  }
+
+  /** A conversa salva desta pasta, para oferecer ao abrir. */
+  savedSession(): { items: number; openTasks: number } | null {
+    const saved = this.sessionFile ? loadSession(this.sessionFile) : null;
+    if (!saved?.history.length) return null;
+    return { items: saved.history.length, openTasks: saved.tasks.filter((task) => isOpen(task)).length };
+  }
+
+  /** Volta para a conversa salva. Devolve quantas tarefas ainda estão abertas. */
+  restoreSession(): number | null {
+    if (this.running) throw new Error('A equipe ainda está trabalhando.');
+    const saved = this.sessionFile ? loadSession(this.sessionFile) : null;
+    if (!saved) return null;
+    this.history = saved.history;
+    this.tasks = saved.tasks;
+    this.changedFiles = new Set(saved.changedFiles);
+    this.lastUserText = saved.lastUserText;
+    this.nextTask = saved.nextTask;
+    return this.tasks.filter((task) => isOpen(task)).length;
+  }
+
+  private persist(): void {
+    if (!this.sessionFile) return;
+    try {
+      saveSession(this.sessionFile, {
+        history: this.history,
+        tasks: this.tasks,
+        changedFiles: [...this.changedFiles],
+        lastUserText: this.lastUserText,
+        nextTask: this.nextTask,
+        savedAt: new Date().toISOString(),
+      });
+    } catch {
+      // Sem espaço ou sem permissão: o trabalho segue, só não fica salvo.
+    }
+  }
+
+  /** "Continua": as tarefas abertas voltam a quem cuida delas, sem o líder reler o projeto. */
+  private resumeOpenTasks(): boolean {
+    const open = this.tasks.filter((task) => isOpen(task));
+    if (!open.length) return false;
+    this.pipeline = { ...newPipeline(), reviewQueued: this.pipeline.reviewQueued, testQueued: this.pipeline.testQueued };
+    for (const task of open) {
+      const agent = findAgent(task.assignee);
+      if (!agent) continue;
+      task.status = 'in_progress';
+      this.status(`Retomando "${task.title}" com ${agent.name}.`);
+      this.queue.push({ agent, task, note: this.taskNote(task, 'Continue de onde parou, sem refazer o que já está pronto. Faça o que falta e chame update_task com o resultado.') });
+    }
+    return this.queue.length > 0;
+  }
+
+  private taskNote(task: Task, extra = ''): string {
+    const done = this.changedFiles.size ? `\nArquivos já alterados: ${[...this.changedFiles].slice(0, 20).join(', ')}.` : '';
+    return `Sua tarefa ${task.id}: ${task.title}${task.description ? `\n${task.description}` : ''}${done}${extra ? `\n\n${extra}` : ''}`;
   }
 
   private status(text: string): void {
@@ -145,11 +224,13 @@ export class Runtime extends EventEmitter<RuntimeEvents> {
     const agent = mentionedAgent(text) ?? leadAgent();
     this.history.push({ type: 'user', text });
     this.emit('line', { type: 'user', text });
-    this.lastUserText = text;
-    this.queue.push({ agent, note: 'Atenda à última mensagem do usuário.' });
-    this.delegated = new Set();
-    this.changedFiles = new Set();
-    this.pipeline = { reviewQueued: false, testQueued: false, fixes: 0, closing: false };
+    if (!(asksToContinue(text) && this.resumeOpenTasks())) {
+      this.lastUserText = text;
+      this.queue.push({ agent, note: 'Atenda à última mensagem do usuário.' });
+      this.delegated = new Set();
+      this.changedFiles = new Set();
+      this.pipeline = newPipeline();
+    }
     const controller = new AbortController();
     this.controller = controller;
     this.emit('busy', true);
@@ -157,10 +238,12 @@ export class Runtime extends EventEmitter<RuntimeEvents> {
       while (this.queue.length && !controller.signal.aborted) {
         const next = this.queue.shift() as QueuedTurn;
         await this.runAgent(next, controller.signal);
+        this.persist();
       }
       if (controller.signal.aborted) this.status('Cancelado.');
     } finally {
       this.queue = [];
+      this.persist();
       this.controller = null;
       this.emit('state', null);
       this.emit('busy', false);
@@ -194,6 +277,9 @@ export class Runtime extends EventEmitter<RuntimeEvents> {
     let recovered = false;
     for (;;) {
       let raw = '';
+      // Modelo preso repetindo a mesma frase: corta a resposta em vez de gastar a cota.
+      const stuck = new AbortController();
+      let looped = false;
       try {
         return await chat({
           credential: this.getCredential() ?? '',
@@ -202,14 +288,19 @@ export class Runtime extends EventEmitter<RuntimeEvents> {
           messages: buildContext(this.history, agent, note, CONTEXT_BUDGET_CHARS),
           maxTokens: this.maxTokens,
           timeoutMs: agent.lead ? this.leadTimeoutMs : this.agentTimeoutMs,
-          signal,
+          signal: AbortSignal.any([signal, stuck.signal]),
           onDelta: (delta) => {
             raw += delta;
             this.emit('delta', { agent, text: streamView(raw) });
+            if (streamIsLooping(raw)) {
+              looped = true;
+              stuck.abort();
+            }
           },
         });
       } catch (err) {
         const failure = err as ProviderError;
+        if (looped && !signal.aborted) return { content: collapseRepeats(raw), promptTokens: 0, completionTokens: 0 };
         if (signal.aborted || failure.name === 'AbortError') return null;
         if (failure.timedOut) return 'timeout';
         if (failure.modelNotFound && !recovered) {
@@ -237,8 +328,10 @@ export class Runtime extends EventEmitter<RuntimeEvents> {
 
   private async runAgent({ agent, note: trigger, task }: QueuedTurn, signal: AbortSignal): Promise<void> {
     const toolResults: string[] = [];
+    const memory = new TurnLedger(TURN_MEMORY_CHARS);
     const seenCalls = new Map<string, number>();
     const seenTexts = new Map<string, number>();
+    let repeatWarned = false;
     let reminders = 0;
     let cuts = 0;
     let badCalls = 0;
@@ -246,9 +339,8 @@ export class Runtime extends EventEmitter<RuntimeEvents> {
     for (;;) {
       if (signal.aborted) return;
       this.emit('state', { agent, text: 'pensando' });
-      const note = toolResults.length
-        ? `${trigger}\n\nResultados reais das ferramentas nesta rodada:\n${toolResults.join('\n\n')}\n\nContinue: chame a próxima ferramenta ou termine em poucas frases.`
-        : trigger;
+      const taskOpen = task?.status === 'in_progress';
+      const note = composeNote(trigger, memory.render(), toolResults, memory.nextStep(agent, taskOpen));
       const response = await this.requestModel(agent, note, signal);
       if (!response) return;
       if (response === 'timeout') {
@@ -273,6 +365,7 @@ export class Runtime extends EventEmitter<RuntimeEvents> {
         if (++badCalls >= MAX_BAD_CALLS) {
           if (agent.lead && this.fallbackDelegate(`${agent.name} errou o formato da ferramenta.`)) return;
           this.status(`${agent.name} errou o formato da ferramenta ${badCalls} vezes e foi encerrado. Troque o modelo com /modelos.`);
+          this.giveUp(agent, task, 'Parou por errar o formato da ferramenta.');
           return;
         }
         toolResults.push(parsed.parseError);
@@ -284,23 +377,63 @@ export class Runtime extends EventEmitter<RuntimeEvents> {
         const count = (seenTexts.get(key) ?? 0) + 1;
         seenTexts.set(key, count);
         if (count >= MAX_REPEATS) {
-          this.status(`${agent.name} repetiu a mesma resposta ${count} vezes neste turno e foi encerrado.`);
+          if (!repeatWarned) {
+            repeatWarned = true;
+            seenTexts.clear();
+            toolResults.push('Você repetiu a mesma resposta e nada mudou. Não repita: use o que já leu e faça o próximo passo, ou encerre com update_task status blocked explicando o motivo.');
+            continue;
+          }
+          this.status(`${agent.name} repetiu a mesma resposta e foi encerrado.`);
+          this.giveUp(agent, task, 'Parou por repetir a mesma resposta.');
           return;
         }
-        this.say(agent, parsed.text);
+        if (count === 1) this.say(agent, collapseRepeats(parsed.text));
       }
       if (parsed.tool) {
         const key = `${parsed.tool.name}:${JSON.stringify(parsed.tool.args)}`;
         const count = (seenCalls.get(key) ?? 0) + 1;
         seenCalls.set(key, count);
         if (count >= MAX_REPEATS) {
-          this.status(`${agent.name} repetiu a mesma chamada de ${parsed.tool.name} ${count} vezes e foi encerrado.`);
+          if (!repeatWarned) {
+            repeatWarned = true;
+            seenCalls.clear();
+            toolResults.push(`Você repetiu a mesma chamada de ${parsed.tool.name} e nada mudou. Não repita: faça o próximo passo, ou encerre com update_task status blocked explicando o motivo.`);
+            continue;
+          }
+          this.status(`${agent.name} repetiu a mesma chamada de ${parsed.tool.name} e foi encerrado.`);
+          this.giveUp(agent, task, `Parou por repetir ${parsed.tool.name}.`);
           return;
+        }
+        const reading = isReadOnly(parsed.tool.name);
+        if (reading) {
+          memory.countRead();
+          if (memory.pressure(agent, task?.status === 'in_progress') === 'block') {
+            toolResults.push(memory.blockedMessage(agent));
+            continue;
+          }
+          if (memory.has(key)) {
+            toolResults.push(`Você já leu isso: o conteúdo está em "Já lido". Faça o próximo passo.`);
+            continue;
+          }
         }
         this.emit('state', { agent, text: `executando ${parsed.tool.name}` });
         const outcome = await this.executeTool(agent, parsed.tool, task, signal);
         this.emit('line', { type: 'tool', agent, tool: parsed.tool.name, detail: toolDetail(parsed.tool.args), ok: outcome.ok, summary: outcome.summary });
-        toolResults.push(`Resultado de ${parsed.tool.name}: ${outcome.summary}\n${shorten(outcome.content, MAX_TOOL_RESULT_CHARS)}`);
+        reminders = 0;
+        const changedPath = String(parsed.tool.args.path ?? parsed.tool.args.file_path ?? '');
+        if (outcome.ok && FILE_CHANGE.has(parsed.tool.name)) {
+          memory.changed(changedPath);
+          seenCalls.clear();
+          seenTexts.clear();
+        }
+        if (parsed.tool.name === 'run_command') memory.acted(String(parsed.tool.args.command ?? ''), outcome.ok);
+        if (reading && outcome.ok) {
+          const label = `${parsed.tool.name} ${toolDetail(parsed.tool.args)}`.trim();
+          memory.remember(label, shorten(outcome.content, MAX_TOOL_RESULT_CHARS), key, parsed.tool.name === 'read_file' ? changedPath : undefined);
+          toolResults.push(`Resultado de ${label}: guardado em "Já lido".`);
+        } else {
+          toolResults.push(`Resultado de ${parsed.tool.name}: ${outcome.summary}\n${shorten(outcome.content, MAX_TOOL_RESULT_CHARS)}`);
+        }
         while (toolResults.length > MAX_TOOL_RESULTS_IN_CONTEXT) toolResults.shift();
         if (outcome.endsTurn) return;
         continue;
@@ -316,12 +449,35 @@ export class Runtime extends EventEmitter<RuntimeEvents> {
       } else if (!parsed.text) {
         this.status(`${agent.name} não respondeu nada (modelo vazio). Tente de novo ou troque com /modelos.`);
       }
-      // Encerrou sem update_task: a tarefa não pode ficar aberta para sempre.
       if (task?.status === 'in_progress') {
-        this.closeTask(agent, task, 'completed', parsed.text || 'Terminou sem relatar o resultado.');
+        // Texto sem ferramenta não entrega nada, seja qual for a frase.
+        if (agent.id === 'desenvolvedor' && reminders < MAX_ACTION_REMINDERS && !parsed.text.trim().endsWith('?')) {
+          reminders++;
+          toolResults.push('Sua tarefa continua aberta e nada aconteceu nesta resposta. Chame a próxima ferramenta agora, no formato <tool>, ou update_task se já terminou.');
+          continue;
+        }
+        // Falar não é entregar: quem deveria alterar arquivos e não alterou não concluiu.
+        if (agent.id === 'desenvolvedor' && !this.changedFiles.size) {
+          this.giveUp(agent, task, parsed.text || 'Terminou sem fazer alterações.');
+        } else {
+          this.closeTask(agent, task, 'completed', parsed.text || 'Terminou sem relatar o resultado.');
+        }
       }
       return;
     }
+  }
+
+  /** A tarefa volta uma vez com o que já foi feito. Na segunda, fica como não concluída. */
+  private giveUp(agent: Agent, task: Task | undefined, reason: string): void {
+    if (task?.status !== 'in_progress') return;
+    if (!agent.lead && this.pipeline.retries < MAX_TASK_RETRIES) {
+      this.pipeline.retries++;
+      this.status(`${agent.name} parou sem entregar "${task.title}". A tarefa voltou para ele.`);
+      this.queue.push({ agent, task, note: this.taskNote(task, 'Você parou sem entregar. Continue de onde parou, sem refazer o que já está pronto: altere o que falta e chame update_task com o resultado.') });
+      return;
+    }
+    this.status(`"${task.title}" não foi concluída. Digite continua para tentar de novo.`);
+    this.closeTask(agent, task, 'blocked', reason);
   }
 
   private say(agent: Agent, text: string): void {
@@ -333,11 +489,7 @@ export class Runtime extends EventEmitter<RuntimeEvents> {
     const task: Task = { id: `t${this.nextTask++}`, title, description, assignee: assignee.id, status: 'in_progress' };
     this.tasks.push(task);
     this.emit('line', { type: 'delegate', to: assignee, text: title });
-    this.queue.push({
-      agent: assignee,
-      task,
-      note: `Sua tarefa ${task.id}: ${title}${description ? `\n${description}` : ''}`,
-    });
+    this.queue.push({ agent: assignee, task, note: this.taskNote(task) });
     return task;
   }
 

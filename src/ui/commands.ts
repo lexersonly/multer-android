@@ -161,7 +161,23 @@ function processesCommand(ctx: CommandContext): void {
     : 'Nenhum processo em segundo plano.');
 }
 
+function resumeCommand(ctx: CommandContext): void {
+  const open = ctx.runtime.restoreSession();
+  if (open === null) return ctx.note('Não há conversa salva nesta pasta.');
+  ctx.note(open
+    ? `Conversa recuperada, com ${open} tarefa(s) aberta(s). Digite continua para seguir.`
+    : 'Conversa recuperada. Pode seguir de onde parou.');
+}
+
 const COMMANDS: Command[] = [
+  { names: ['retomar', 'resume'], usage: '/retomar', hint: 'voltar à conversa salva · resume saved chat', run: resumeCommand },
+  { names: ['cancelar', 'cancel'], usage: '/cancelar', hint: 'interromper a equipe, como o Esc · stop the team', run: (ctx) => {
+    if (!ctx.runtime.running) return ctx.note('A equipe não está trabalhando.');
+    ctx.runtime.cancel();
+  } },
+  { names: ['arquivos', 'files'], usage: '/arquivos', hint: 'o que a equipe alterou · changed files', run: (ctx) => {
+    ctx.note(ctx.runtime.files.join('\n') || 'Nenhum arquivo alterado neste pedido.');
+  } },
   { names: ['login', 'entrar'], usage: '/login', hint: 'colar o token do APK · paste the APK token', run: (ctx, arg) => {
     if (/^(chave|key)$/i.test(arg)) return loginWithKey(ctx);
     ctx.startPaste({ kind: 'token' });
