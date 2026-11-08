@@ -124,7 +124,8 @@ async function main(): Promise<number> {
   const { App } = await import('./ui/app.ts');
   const releasePhone = attachPhone(runtime);
   process.on('exit', releasePhone);
-  const app = render(createElement(App, { runtime, plugins, root }));
+  // Ctrl+C fica com o app: interrompe ou limpa, e só fecha na segunda vez, como no Claude Code.
+  const app = render(createElement(App, { runtime, plugins, root }), { exitOnCtrlC: false });
   await app.waitUntilExit();
   releasePhone();
   runtime.shutdown();

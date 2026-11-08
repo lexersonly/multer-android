@@ -50,3 +50,26 @@ test('processo em segundo plano recebe o segredo e o token nunca aparece nos log
   assert.equal(dead.ok, false);
   assert.match(dead.summary, /código 3/);
 });
+
+test('texto ao vivo cabe na tela do celular, contando a quebra de linha', async () => {
+  const { tailThatFits } = await import('../src/ui/app.ts');
+  const text = ['a'.repeat(100), 'linha 2', 'linha 3'].join('\n');
+  assert.equal(tailThatFits(text, 40, 2), 'linha 2\nlinha 3');
+  assert.equal(tailThatFits(text, 40, 5), text);
+  assert.equal(tailThatFits('x'.repeat(200), 10, 3).length, 30);
+});
+
+test('o spinner mostra o nome da ferramenta, não o nome técnico', async () => {
+  const { activityLabel } = await import('../src/ui/app.ts');
+  assert.equal(activityLabel('Desenvolvedor', 'executando run_command'), 'Desenvolvedor · Comando…');
+  assert.equal(activityLabel('Arquiteto', 'pensando', 'Matutando'), 'Arquiteto · Matutando…');
+});
+
+test('o logo MULTER cabe no celular na fonte pequena e alinha as linhas', async () => {
+  const { logoRows, logoWidth } = await import('../src/ui/logo.ts');
+  for (const font of ['big', 'small'] as const) {
+    const widths = new Set(logoRows('MULTER', font).map((row) => Array.from(row).length));
+    assert.equal(widths.size, 1);
+  }
+  assert.ok(logoWidth('small') <= 40);
+});

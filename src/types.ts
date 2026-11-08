@@ -63,7 +63,7 @@ export type Approver = (request: ApprovalRequest) => Promise<ApprovalAnswer>;
 
 /** O que aparece no histórico da tela. */
 export type UiLine =
-  | { type: 'banner'; root: string; model: string }
+  | { type: 'banner'; root: string; model: string; saved?: { openTasks: number } | null }
   | { type: 'user'; text: string }
   | { type: 'agent'; agent: Agent; text: string }
   | { type: 'tool'; agent: Agent; tool: string; detail: string; ok: boolean; summary: string }

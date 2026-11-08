@@ -616,7 +616,8 @@ export class Runtime extends EventEmitter<RuntimeEvents> {
     // O desenvolvedor precisa do pedido inteiro, não só de um título.
     const description = String(args.description ?? '').trim() || this.lastUserText.slice(0, 600);
     const task = this.createTask(title, assignee, description);
-    return { ok: true, summary: `Tarefa ${task.id} entregue a ${assignee.name}`, content: 'Entregue. Termine agora com uma frase: o resultado chega a você depois.' };
+    // O turno do líder acaba aqui: se ele seguisse falando, diria "pronto" antes de alguém trabalhar.
+    return { ok: true, summary: `Tarefa ${task.id} entregue a ${assignee.name}`, content: 'Entregue. O resultado chega a você depois.', endsTurn: true };
   }
 
   private sendMessage(agent: Agent, args: ToolArgs): ToolOutcome {
@@ -627,7 +628,7 @@ export class Runtime extends EventEmitter<RuntimeEvents> {
     if (target === agent) return denied('Você não pode mandar mensagem a si mesmo.');
     this.queue.push({ agent: target, note: `${agent.name} mandou: ${text}` });
     this.emit('line', { type: 'delegate', to: target, text });
-    return { ok: true, summary: `Mensagem enviada a ${target.name}`, content: 'Enviada. Termine agora: a resposta chega depois.' };
+    return { ok: true, summary: `Mensagem enviada a ${target.name}`, content: 'Enviada. A resposta chega depois.', endsTurn: true };
   }
 
   private updateTask(agent: Agent, args: ToolArgs, current: Task | undefined): ToolOutcome {

@@ -8,6 +8,14 @@ Uma equipe de agentes de IA no terminal do seu Android. O Multer roda dentro do 
 
 O Multer recebe atualizações toda semana. Para receber, digite `/atualizar`.
 
+**0.4.1**
+- Interface nova no jeito do Claude Code, nas cores do Multer: logo MULTER animado, boas-vindas com dicas e atividade recente, lista de tarefas ☒ ◼ ☐ e "Trabalhou por" no fim.
+- Permissão com opções numeradas (setas e Enter, ou 1, 2, 3) e menu de `/` navegável com as setas.
+- `!comando` roda direto no terminal, `?` mostra os atalhos e Shift+Tab ou `/auto` aprova tudo sozinho.
+- Ctrl+C interrompe ou limpa o texto e só fecha na segunda vez seguida; Esc duas vezes apaga o texto.
+- O arquiteto não diz mais "pronto" antes de a equipe trabalhar.
+- O Enter que chega junto com o texto envia o pedido, e o texto ao vivo não passa da altura da tela.
+
 **0.4.0**
 - Os agentes guardam o que já leram e param de reler os mesmos arquivos. Quem lê demais sem agir é cobrado e depois precisa fazer a tarefa.
 - Desenvolvedor que só fala não conclui mais a tarefa: ela volta uma vez com o que já foi feito e, se não andar, aparece como não concluída.

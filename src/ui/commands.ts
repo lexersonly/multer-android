@@ -25,6 +25,8 @@ export interface CommandContext {
   setModel: (model: string) => void;
   startPaste: (target: PasteTarget) => void;
   exit: () => void;
+  /** Liga e desliga o modo que aprova tudo sozinho (o mesmo do Shift+Tab). */
+  toggleAuto?: () => void;
   /** Quem cancela o login em andamento, com Esc. */
   setLoginAbort: (controller: AbortController | null) => void;
 }
@@ -210,6 +212,7 @@ const COMMANDS: Command[] = [
     ctx.note('Conversa nova.');
   } },
   { names: ['atualizar', 'update'], usage: '/atualizar', hint: 'buscar versão nova · update multer', run: updateCommand },
+  { names: ['auto'], usage: '/auto', hint: 'aprovar tudo sozinho, como o shift+tab · auto-approve', run: (ctx) => ctx.toggleAuto?.() },
   { names: ['ajuda', 'help'], usage: '/ajuda', hint: 'mostrar os comandos · show commands', run: (ctx) => ctx.note(HELP) },
   { names: ['sair', 'exit', 'quit'], usage: '/sair', hint: 'fechar · quit', run: (ctx) => ctx.exit() },
 ];
@@ -219,7 +222,7 @@ export const HELP = `${COMMANDS.map((command) => `${command.names.map((name) => 
 Esc                  cancelar · cancel`;
 
 /** Para a lista de sugestões enquanto a pessoa digita. */
-export function suggest(prefix: string): Array<{ names: string[]; hint: string }> {
+export function suggest(prefix: string): Array<{ names: string[]; hint: string; usage: string }> {
   const wanted = prefix.toLowerCase();
   return COMMANDS.filter((command) => command.names.some((name) => name.startsWith(wanted)));
 }
