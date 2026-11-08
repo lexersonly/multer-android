@@ -224,7 +224,7 @@ function describeCall({ tool, args }: ApprovalRequest): string {
 function approvalOptions(approval: ApprovalRequest): Array<{ answer: ApprovalAnswer; label: string }> {
   return [
     { answer: 'yes', label: 'Sim' },
-    ...(approval.offerAlways ? [{ answer: 'always' as const, label: 'Sim, e não perguntar de novo nesta conversa' }] : []),
+    ...(approval.offerAlways ? [{ answer: 'always' as const, label: 'Sim, e não perguntar de novo' }] : []),
     { answer: 'no', label: 'Não (esc)' },
   ];
 }
