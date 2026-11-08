@@ -1,6 +1,6 @@
 {
   "name": "multer-android",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Multer no terminal, para rodar dentro do Termux",
   "license": "MIT",
   "private": true,

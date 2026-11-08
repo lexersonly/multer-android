@@ -145,7 +145,7 @@ test('o streaming chega em pedaços e sem a chamada de ferramenta', async () => 
 
 test('promessa sem ferramenta recebe lembrete e depois chama', async () => {
   const { runtime, lines } = setup();
-  script = ['Vou delegar ao Desenvolvedor.', tool('assign_task', { title: 'X', assignee: 'desenvolvedor' }), 'Feito.', tool('update_task', { status: 'completed', result: 'ok' }), 'Concluído.'];
+  script = ['Vou delegar ao Desenvolvedor.', tool('assign_task', { title: 'X', assignee: 'desenvolvedor' }), tool('run_command', { command: 'true' }), tool('update_task', { status: 'completed', result: 'ok' }), 'Concluído.'];
   await runtime.send('faça');
   assert.match(lastNote(1), /não chamou ferramenta/);
   assert.equal(runtime.tasks.length, 1);
@@ -503,4 +503,50 @@ test('a conversa salva volta depois de fechar, em arquivo privado', async () => 
   assert.equal(second.runtime.savedSession(), null);
   writeFileSync(sessionFile, 'isto não é json');
   assert.equal(setup({ sessionFile }).runtime.savedSession(), null, 'arquivo quebrado não impede abrir');
+});
+
+test('desenvolvedor não conclui sem trabalho: o primeiro "pronto" vazio é recusado', async () => {
+  const { runtime } = setup();
+  script = [
+    tool('assign_task', { title: 'Jogo', assignee: 'desenvolvedor', description: 'jogo' }),
+    tool('update_task', { status: 'completed', result: 'feito' }),
+    tool('write_file', { path: 'jogo.txt', content: 'ok' }),
+    tool('update_task', { status: 'completed', result: 'feito de verdade' }),
+  ];
+  await runtime.send('faça um jogo').catch(() => {});
+  assert.match(lastNote(2), /ainda não alterou nenhum arquivo/);
+  const dev = runtime.tasks.find((task) => task.assignee === 'desenvolvedor');
+  assert.equal(dev?.status, 'completed');
+  assert.equal(dev?.result, 'feito de verdade');
+});
+
+test('arquivo com erro de sintaxe volta na hora e trava o fim até ser corrigido', async () => {
+  const { root, runtime } = setup();
+  script = [
+    tool('assign_task', { title: 'Script', assignee: 'desenvolvedor', description: 'script' }),
+    tool('write_file', { path: 'app.js', content: 'function (' }),
+    tool('update_task', { status: 'completed', result: 'pronto' }),
+    tool('write_file', { path: 'app.js', content: 'console.log(1);\n' }),
+    tool('update_task', { status: 'completed', result: 'corrigido' }),
+  ];
+  await runtime.send('faça um script').catch(() => {});
+  assert.match(lastNote(2), /erro de sintaxe/);
+  assert.match(lastNote(3), /Ainda há erro de sintaxe/);
+  assert.equal(readFileSync(join(root, 'app.js'), 'utf8'), 'console.log(1);\n');
+  assert.equal(runtime.tasks.find((task) => task.assignee === 'desenvolvedor')?.result, 'corrigido');
+});
+
+test('pedido com várias partes: confere a lista uma vez antes de fechar', async () => {
+  const { runtime } = setup();
+  script = [
+    tool('assign_task', { title: 'Cobrinha', assignee: 'desenvolvedor', description: 'jogo da cobrinha com placar na tela, recorde salvo no navegador e controles por toque' }),
+    tool('write_file', { path: 'jogo.txt', content: 'ok' }),
+    tool('update_task', { status: 'completed', result: 'pronto' }),
+    tool('update_task', { status: 'completed', result: 'tudo feito' }),
+  ];
+  await runtime.send('cobrinha').catch(() => {});
+  const note = lastNote(3);
+  assert.match(note, /confira se o pedido inteiro/);
+  assert.match(note, /recorde salvo no navegador/);
+  assert.equal(runtime.tasks.find((task) => task.assignee === 'desenvolvedor')?.result, 'tudo feito');
 });

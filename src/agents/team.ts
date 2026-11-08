@@ -17,7 +17,7 @@ export const TEAM: readonly Agent[] = [
   {
     id: 'desenvolvedor', name: 'Desenvolvedor', role: 'desenvolvedor', color: 'blue',
     tools: [...READ, 'write_file', 'append_file', 'edit_file', 'run_command', ...PROCESS, 'request_secret', 'update_task', ...COMMON],
-    rule: 'Cada resposta tem limite de tamanho: grave arquivo grande em partes, write_file com o começo e append_file com o resto. Bot do Discord: discord.js, token só por process.env.DISCORD_TOKEN (peça com request_secret, nunca no código), rode com start_process e confira process_logs. Ao terminar uma tarefa, use update_task com o resultado e pare.',
+    rule: 'Cada resposta tem limite de tamanho: grave arquivo grande em partes, write_file com o começo e append_file com o resto. Bot do Discord: discord.js, token só por process.env.DISCORD_TOKEN (peça com request_secret, nunca no código), rode com start_process e confira process_logs. Depois de gravar, rode o programa ou um teste rápido com run_command. Faça o pedido inteiro, não só a primeira parte. Ao terminar, use update_task com o resultado e pare: o Multer confere a sintaxe e recusa o fim se algo falhou.',
   },
   {
     id: 'revisor', name: 'Revisor', role: 'revisor', color: 'yellow',

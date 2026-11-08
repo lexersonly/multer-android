@@ -10,6 +10,7 @@ import { chat, type ChatResult, DEFAULT_MODEL, modelIds, type ProviderError } fr
 import { deleteSession, loadSession, saveSession } from '../session.ts';
 import { approvalFor } from '../tools/approval.ts';
 import { isLocalTool, runLocalTool } from '../tools/local.ts';
+import { canCheck, closeRefusal, type Gate, requestParts, syntaxError } from './checks.ts';
 import { ProcessManager } from '../tools/processes.ts';
 import type { Agent, Approver, HistoryItem, Task, ToolArgs, ToolCall, ToolOutcome, UiLine } from '../types.ts';
 import { shortName } from '../ui/models.ts';
@@ -108,6 +109,8 @@ export class Runtime extends EventEmitter<RuntimeEvents> {
   private queue: QueuedTurn[] = [];
   private delegated = new Set<string>();
   private changedFiles = new Set<string>();
+  /** O que se sabe do trabalho em cada tarefa, para não aceitar um "pronto" vazio. */
+  private gates = new Map<string, Gate>();
   private pipeline: Pipeline = newPipeline();
   private lastUserText = '';
   private allowAlways = false;
@@ -544,8 +547,9 @@ export class Runtime extends EventEmitter<RuntimeEvents> {
         if (answer === 'always') this.allowAlways = true;
       }
       const outcome = await runLocalTool(name, this.root, args, signal);
-      if (outcome.ok && FILE_CHANGE.has(name)) this.changedFiles.add(String(args.path ?? args.file_path ?? ''));
-      return outcome;
+      const path = String(args.path ?? args.file_path ?? '');
+      if (outcome.ok && FILE_CHANGE.has(name)) this.changedFiles.add(path);
+      return task ? this.checkWork(task, name, args, path, outcome) : outcome;
     }
     if (isPlugin) return this.callPlugin(agent, name, args);
 
@@ -631,10 +635,65 @@ export class Runtime extends EventEmitter<RuntimeEvents> {
     return { ok: true, summary: `Mensagem enviada a ${target.name}`, content: 'Enviada. A resposta chega depois.', endsTurn: true };
   }
 
+  private gateFor(task: Task): Gate {
+    let gate = this.gates.get(task.id);
+    if (!gate) {
+      gate = { broken: new Map(), failedCommand: null, changedFiles: 0, okCommands: 0, refusals: 0, checklistShown: false, parts: requestParts(task.description ?? '') };
+      this.gates.set(task.id, gate);
+    }
+    return gate;
+  }
+
+  /**
+   * Anota o que a ferramenta fez na tarefa e confere a sintaxe do arquivo gravado. O erro volta
+   * junto com o resultado, para o modelo corrigir na hora e não só lá no testador.
+   */
+  private async checkWork(task: Task, name: string, args: ToolArgs, path: string, outcome: ToolOutcome): Promise<ToolOutcome> {
+    const gate = this.gateFor(task);
+    if (name === 'run_command') {
+      if (outcome.ok) {
+        gate.okCommands++;
+        gate.failedCommand = null;
+      } else {
+        gate.failedCommand = { command: shorten(String(args.command ?? ''), 120), summary: outcome.summary };
+      }
+      return outcome;
+    }
+    if (!outcome.ok || !FILE_CHANGE.has(name)) return outcome;
+    gate.changedFiles++;
+    // Mexeu no código depois do erro: o comando que falhou precisa rodar de novo para valer.
+    gate.failedCommand = null;
+    if (!canCheck(path)) return outcome;
+    const error = await syntaxError(this.root, path);
+    if (!error) {
+      gate.broken.delete(path);
+      return outcome;
+    }
+    gate.broken.set(path, error);
+    const partial = name === 'write_file' || name === 'append_file' || name === 'create_file'
+      ? ' Se você ainda vai gravar o resto com append_file, continue; senão, corrija agora.'
+      : ' Corrija agora.';
+    return {
+      ...outcome,
+      summary: `${outcome.summary} · erro de sintaxe`,
+      content: `${outcome.content}\n\nAtenção: ${path} ficou com erro de sintaxe:\n${error}\n${partial.trim()}`,
+    };
+  }
+
   private updateTask(agent: Agent, args: ToolArgs, current: Task | undefined): ToolOutcome {
     const task = current ?? this.tasks.find((item) => item.id === args.id || item.id === args.task_id);
     if (!task) return { ok: true, summary: 'Sem tarefa aberta', content: 'Você não tem tarefa aberta. Responda em poucas frases.' };
     const status = args.status === 'blocked' ? 'blocked' : 'completed';
+    // "Pronto" do desenvolvedor só vale com trabalho feito, sem erro de sintaxe e sem comando quebrado.
+    if (status === 'completed' && agent.id === 'desenvolvedor') {
+      const gate = this.gateFor(task);
+      const refusal = closeRefusal(gate);
+      if (refusal) {
+        gate.refusals++;
+        if (refusal.checklist) gate.checklistShown = true;
+        return { ok: false, summary: refusal.checklist ? 'Conferindo o pedido antes de fechar' : 'Tarefa ainda não concluída', content: refusal.reason };
+      }
+    }
     this.closeTask(agent, task, status, String(args.result ?? args.summary ?? 'Sem detalhes.'));
     return { ok: true, summary: `Tarefa ${task.id}: ${status}`, content: 'Registrado. Responda em uma frase e pare.', endsTurn: true };
   }

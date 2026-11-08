@@ -8,6 +8,11 @@ Uma equipe de agentes de IA no terminal do seu Android. O Multer roda dentro do 
 
 O Multer recebe atualizações toda semana. Para receber, digite `/atualizar`.
 
+**0.4.2**
+- Cada arquivo que o desenvolvedor grava tem a sintaxe conferida na hora (Python, JavaScript, JSON e shell), e o erro volta para ele corrigir.
+- O "pronto" do desenvolvedor só vale com trabalho feito: sem arquivo alterado, com erro de sintaxe ou com o último comando falhando, a tarefa não fecha.
+- Pedido com várias partes: antes de fechar, ele confere a lista do que foi pedido.
+
 **0.4.1**
 - Interface nova no jeito do Claude Code, nas cores do Multer: logo MULTER animado, boas-vindas com dicas e atividade recente, lista de tarefas ☒ ◼ ☐ e "Trabalhou por" no fim.
 - Permissão com opções numeradas (setas e Enter, ou 1, 2, 3) e menu de `/` navegável com as setas.
