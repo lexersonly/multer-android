@@ -8,12 +8,16 @@
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { configDir } from '../auth/credentials.ts';
+import { FREE_TOKEN } from './free-token.ts';
 
 export const FREE_PREFIX = 'nightrouter/';
 /** Endereço do pool. `MULTER_FREE_URL` aponta para outro servidor, se precisar. */
 const poolUrl = () => `${(process.env.MULTER_FREE_URL || 'https://multer-builderai.vercel.app').replace(/\/+$/, '')}/api/ai/free-keys`;
 const CACHE_TTL_MS = 10 * 60_000;
 const REQUEST_TIMEOUT_MS = 15_000;
+
+/** Token recusado: não adianta cair para o cache velho sem avisar. */
+class PoolAuthError extends Error {}
 
 export const isFree = (model: string): boolean => model.startsWith(FREE_PREFIX);
 export const bareFree = (model: string): string => (isFree(model) ? model.slice(FREE_PREFIX.length) : model);
@@ -57,7 +61,13 @@ function writeCache(value: Snapshot): void {
 
 async function fetchPool(): Promise<Snapshot | null> {
   try {
-    const response = await fetch(poolUrl(), { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    const response = await fetch(poolUrl(), {
+      headers: { Authorization: `Bearer ${FREE_TOKEN}` },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (response.status === 401 || response.status === 403) {
+      throw new PoolAuthError('O servidor recusou o token do pool. Defina MULTER_FREE_TOKEN com o token novo.');
+    }
     if (!response.ok) return null;
     const value = await response.json() as Partial<Snapshot>;
     if (!Array.isArray(value.keys) || !value.keys.length) return null;
@@ -71,7 +81,8 @@ async function fetchPool(): Promise<Snapshot | null> {
     if (!fresh.keys.length) return null;
     writeCache(fresh);
     return fresh;
-  } catch {
+  } catch (err) {
+    if (err instanceof PoolAuthError) throw err;
     return null;
   }
 }
@@ -96,12 +107,21 @@ async function pool(): Promise<Snapshot | null> {
 
 /** Modelos gratuitos que o servidor oferece hoje. */
 export async function freeModels(): Promise<string[]> {
-  return (await pool())?.models ?? [];
+  try {
+    return (await pool())?.models ?? [];
+  } catch {
+    // Sem lista ainda dá para usar o modelo escolhido.
+    return [];
+  }
 }
 
 export async function freeAvailable(): Promise<boolean> {
-  const found = await pool();
-  return Boolean(found?.keys.some((key) => !dead.has(key)));
+  try {
+    const found = await pool();
+    return Boolean(found?.keys.some((key) => !dead.has(key)));
+  } catch {
+    return false;
+  }
 }
 
 /** Reserva a chave com mais folga para este modelo. `null` quando todas estão no limite. */
