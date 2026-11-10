@@ -6,6 +6,7 @@ node_modules/
 # Credenciais nunca entram no repositório.
 .env
 .env.*
+!.env.example
 credential
 *.pem
 *.key

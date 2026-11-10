@@ -8,7 +8,7 @@ import { loadCredential } from './auth/credentials.ts';
 import { nodeMeetsRea, Plugins, REA_VERSION, reaScript } from './plugins/plugins.ts';
 import { loadSettings } from './plugins/settings.ts';
 import { attachPhone } from './phone.ts';
-import { baseUrlFor, DEFAULT_MODEL } from './provider/client.ts';
+import { baseUrlFor, DEFAULT_MODEL, freeModelCatalog } from './provider/client.ts';
 import { sessionPath } from './session.ts';
 import { checkForUpdate, localVersion, runUpdate } from './update.ts';
 
@@ -83,11 +83,13 @@ async function main(): Promise<number> {
   const root = realpathSync(process.cwd());
   const plugins = new Plugins();
   const print = args.indexOf('-p');
+  // Sem login, o padrão é um modelo do pool gratuito do site.
+  const semLogin = loadCredential() ? [] : await freeModelCatalog('').catch(() => []);
   const runtime = new Runtime({
     root,
     plugins,
     getCredential: loadCredential,
-    model: loadSettings().model ?? DEFAULT_MODEL,
+    model: loadSettings().model ?? semLogin[0] ?? DEFAULT_MODEL,
     approve: async () => 'no',
     sessionFile: print >= 0 ? undefined : sessionPath(root),
   });
@@ -103,7 +105,7 @@ async function main(): Promise<number> {
       console.error(USAGE);
       return 2;
     }
-    if (!loadCredential()) {
+    if (!loadCredential() && !semLogin.length) {
       console.error('Sem login. Abra o multer e use /login, ou defina POLLINATIONS_API_KEY.');
       return 1;
     }

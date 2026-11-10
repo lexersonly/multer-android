@@ -7,6 +7,7 @@ import { listSecretNames, SECRET_NAME, saveSecret } from '../auth/secrets.ts';
 import type { Plugins } from '../plugins/plugins.ts';
 import { saveSettings } from '../plugins/settings.ts';
 import { chat, type ChatResult, DEFAULT_MODEL, modelIds, type ProviderError } from '../provider/client.ts';
+import { freeModels } from '../provider/free.ts';
 import { deleteSession, loadSession, saveSession } from '../session.ts';
 import { approvalFor } from '../tools/approval.ts';
 import { isLocalTool, runLocalTool } from '../tools/local.ts';
@@ -256,10 +257,10 @@ export class Runtime extends EventEmitter<RuntimeEvents> {
   /** O modelo que a conta não conhece (ou que mudou de nome) não pode travar a equipe. */
   private async recoverModel(): Promise<boolean> {
     const credential = this.getCredential();
-    if (!credential) return false;
     let ids: { all: string[]; free: string[] };
     try {
-      ids = await modelIds(credential);
+      // Sem login ainda dá para cair nos modelos gratuitos do site.
+      ids = credential ? await modelIds(credential) : { all: await freeModels(), free: await freeModels() };
     } catch {
       return false;
     }

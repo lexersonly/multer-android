@@ -10,6 +10,7 @@ export const shortName = (id: string): string => id.split('/').pop() ?? id;
 /** `community/dono/nome` mostra o dono ao lado, para diferenciar cópias do mesmo modelo. */
 export const ownerOf = (id: string): string => {
   const parts = id.split('/');
+  if (parts[0] === 'nightrouter') return 'grátis';
   return parts.length >= 3 ? parts[1] : parts.length === 2 ? parts[0] : '';
 };
 

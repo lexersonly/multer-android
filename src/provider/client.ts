@@ -2,6 +2,7 @@
 // entrar no Pollinations: o token do APK, com os cookies do Open WebUI, ou uma chave sk_.
 
 import type { ChatMessage } from '../types.ts';
+import { bareFree, burnKey, freeBaseUrl, freeHeaders, freeModels, isFree, noteLimit, pickKey } from './free.ts';
 
 const GEN_BASE = 'https://gen.pollinations.ai/v1';
 const OPENWEBUI_BASE = 'https://openwebui.pollinations.ai/api';
@@ -214,6 +215,74 @@ async function warmUp(credential: string, signal?: AbortSignal): Promise<void> {
   }
 }
 
+const MAX_FREE_STRIKES = 3;
+
+/** Uma resposta aceita, lida em fluxo ou inteira. */
+async function readFree(response: Response, onDelta: (delta: string) => void, stream: boolean): Promise<ChatResult> {
+  if (stream && (response.headers.get('content-type') ?? '').includes('text/event-stream')) return readStream(response, onDelta);
+  const value = await response.json() as {
+    error?: unknown;
+    choices?: Array<{ message?: { content?: string } }>;
+    usage?: { prompt_tokens?: number; completion_tokens?: number };
+  };
+  const content = value.choices?.[0]?.message?.content ?? '';
+  if (content) onDelta(content);
+  return { content, promptTokens: value.usage?.prompt_tokens ?? 0, completionTokens: value.usage?.completion_tokens ?? 0 };
+}
+
+/**
+ * Pool gratuito: tenta as chaves com folga, uma atrás da outra, e escorrega para outro modelo
+ * grátis quando o modelo escolhido inteiro encheu o minuto. Chave recusada sai do pool.
+ */
+async function chatFree(
+  body: ChatBody,
+  options: { onDelta: (delta: string) => void; signal?: AbortSignal; timeoutMs?: number; stream: boolean; model: string },
+): Promise<ChatResult> {
+  const { onDelta, signal, timeoutMs, stream, model } = options;
+  const wanted = bareFree(model);
+  const others = (await freeModels()).map(bareFree).filter((id) => id !== wanted).sort(() => Math.random() - 0.5);
+  let faltando = 0;
+  for (const target of [wanted, ...others]) {
+    for (let strike = 0; strike < MAX_FREE_STRIKES; strike++) {
+      const key = await pickKey(target);
+      if (!key) break;
+      const timeout = timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined;
+      const combined = signal && timeout ? AbortSignal.any([signal, timeout]) : (signal ?? timeout);
+      let response: Response;
+      try {
+        response = await fetch(`${freeBaseUrl()}/chat/completions`, {
+          method: 'POST',
+          headers: freeHeaders(key),
+          body: JSON.stringify({ ...body, model: target }),
+          signal: combined,
+        });
+      } catch (err) {
+        if ((err as Error).name === 'AbortError' && timeout && !signal?.aborted) {
+          const failure: ProviderError = new Error(`O modelo demorou mais de ${Math.round((timeoutMs ?? 0) / 1000)}s para responder.`);
+          failure.timedOut = true;
+          throw failure;
+        }
+        throw err as ProviderError;
+      }
+      if (response.ok) return readFree(response, onDelta, stream);
+      const text = await response.text();
+      if (response.status === 429 || response.status === 503) {
+        noteLimit(target, key);
+        continue;
+      }
+      if (response.status === 401 || response.status === 402 || response.status === 403) {
+        burnKey(key);
+        continue;
+      }
+      throw errorFromBody(response.status, text);
+    }
+  }
+  if (faltando === 0) faltando++;
+  const failure: ProviderError = new Error('As chaves gratuitas acabaram por agora. Tente de novo em um minuto ou faça /login.');
+  failure.retryable = true;
+  throw failure;
+}
+
 export async function chat(options: ChatOptions): Promise<ChatResult> {
   const { credential, model, system, messages, temperature = 0.2, maxTokens, signal, onDelta = () => {}, stream = true, timeoutMs } = options;
   const body: ChatBody = {
@@ -223,6 +292,8 @@ export async function chat(options: ChatOptions): Promise<ChatResult> {
     max_tokens: maxTokens,
     stream,
   };
+  // Modelos com prefixo próprio não passam pelo Pollinations: vão para o pool gratuito do site.
+  if (isFree(model)) return chatFree(body, { onDelta, signal, timeoutMs, stream, model });
   // O Open WebUI injeta as memórias da conta quando este recurso vem ligado, como no app.
   if (parseCredential(credential).cookie) body.features = { memory: true };
   await warmUp(credential, signal);
@@ -267,12 +338,19 @@ async function fetchCatalog(credential: string): Promise<{ data?: CatalogItem[] 
 /** Todos os ids da conta e os gratuitos, sem testar se cada um responde. */
 export async function modelIds(credential: string): Promise<{ all: string[]; free: string[] }> {
   const catalog = await fetchCatalog(credential);
-  return { all: (catalog.data ?? []).map((item) => item.id), free: freeTextModels(catalog).sort() };
+  const livres = await freeModels();
+  return { all: [...(catalog.data ?? []).map((item) => item.id), ...livres], free: [...freeTextModels(catalog).sort(), ...livres] };
 }
 
 /** A lista do catálogo, rápida: sem testar se cada modelo responde. */
 export async function freeModelCatalog(credential: string): Promise<string[]> {
-  return freeTextModels(await fetchCatalog(credential)).sort();
+  const livres = await freeModels();
+  if (!credential) return livres;
+  try {
+    return [...freeTextModels(await fetchCatalog(credential)).sort(), ...livres];
+  } catch {
+    return livres;
+  }
 }
 
 /** Confere se a sessão é aceita antes de guardá-la. */
@@ -311,5 +389,6 @@ export async function workingFreeModels(credential: string, onProgress: (done: n
       onProgress(++done, candidates.length);
     }
   }));
-  return working.sort();
+  // Os do pool do site já vêm curados: não precisam de teste um por um.
+  return [...working.sort(), ...(await freeModels())];
 }
