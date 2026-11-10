@@ -152,6 +152,10 @@ async function fetchPool(): Promise<Snapshot | null> {
       forgetToken();
       token = (await newToken()) ?? FREE_TOKEN;
       response = await pedir();
+      if (response.status === 403) {
+        const motivo = await response.json().catch(() => ({})) as { error?: string };
+        throw new PoolAuthError(motivo.error ?? 'Esta instalação está bloqueada no pool.');
+      }
       if (response.status === 401 || response.status === 403) {
         throw new PoolAuthError('O servidor recusou o acesso ao pool. Defina MULTER_FREE_TOKEN com o token novo.');
       }
@@ -212,8 +216,25 @@ export async function freeAvailable(): Promise<boolean> {
   }
 }
 
+let buscando = false;
+
 /** Reserva a chave com mais folga para este modelo. `null` quando todas estão no limite. */
 export async function pickKey(model: string): Promise<string | null> {
+  const achada = await escolher(model);
+  // Pool vindo do ambiente é fixo: não há de onde buscar mais.
+  if (achada || buscando || process.env.MULTER_FREE_KEYS) return achada;
+  // A leva local acabou: pede outra antes de desistir.
+  buscando = true;
+  try {
+    snapshot = null;
+    await fetchPool();
+    return await escolher(model);
+  } finally {
+    buscando = false;
+  }
+}
+
+async function escolher(model: string): Promise<string | null> {
   const found = await pool();
   if (!found) return null;
   const bare = bareFree(model);

@@ -123,7 +123,8 @@ multer -p "escreva um script que renomeia fotos por data"
 
 O pool de chaves vem do site do Multer em tempo de execução e fica em cache por 10 minutos em
 `~/.config/multer-android/free-keys.json` — **nada de chave é escrito no repositório**. A rota
-exige um token só de leitura, separado do que escreve chaves. Cada
+exige um token só de leitura, curto (25 min) e preso ao aparelho, separado do que escreve chaves.
+Se um aparelho abusar, ele é bloqueado no servidor na hora e passa a receber 403. Cada
 chave serve 3 pedidos por minuto e por modelo; quando estoura, o pedido passa para a próxima e,
 se o modelo inteiro encher, para outro modelo grátis. As gratuitas são limitadas: para uso
 longo, faça `/login`.
