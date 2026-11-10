@@ -76,6 +76,10 @@ command -v termux-open-url >/dev/null 2>&1 || pkg install -y termux-tools
 
 install_dependencies
 
+# Build minificado: o app publicado não vai em TypeScript legível. Se o Bun não veio,
+# o lançador cai no fonte e tudo continua funcionando.
+command -v bun >/dev/null 2>&1 && bun run build >/dev/null 2>&1 || echo "Sem build minificado: seguindo no fonte."
+
 # Lançador próprio: /usr/bin/env só existe no Termux quando o termux-exec está ativo.
 rm -f "$PREFIX/bin/multer"
 cat > "$PREFIX/bin/multer" <<LAUNCHER

@@ -341,14 +341,17 @@ O Multer está em evolução, e o melhor jeito de ajudar é contar o que acontec
 
 ## 👩‍💻 Desenvolvimento
 
-O código é TypeScript e o Node remove os tipos ao carregar, então não há build no celular. A interface usa [Ink](https://github.com/vadimdemedes/ink).
+O código é TypeScript e o Node remove os tipos ao carregar, então durante o desenvolvimento
+não é preciso buildar nada. Quem instala pelo `install.sh` recebe um build **minificado**
+(`dist/multer.min.js`); sem ele, o lançador roda o fonte. A interface usa
+[Ink](https://github.com/vadimdemedes/ink).
 
 ```bash
 bun install
 ```
 
 ```bash
-bun run check
+bun run check && bun run build
 ```
 
 ```text

@@ -12,7 +12,8 @@
     "start": "node bin/multer.js",
     "typecheck": "tsc",
     "test": "node --test \"test/*.test.ts\"",
-    "check": "tsc && node --test \"test/*.test.ts\""
+    "check": "tsc && node --test \"test/*.test.ts\"",
+    "build": "bun build src/cli.ts --target node --packages external --minify --outfile dist/multer.min.js"
   },
   "engines": {
     "node": ">=22.18"

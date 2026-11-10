@@ -6,13 +6,16 @@
 // são puladas na hora, e chaves recusadas saem do cache.
 
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { configDir } from '../auth/credentials.ts';
 import { FREE_TOKEN } from './free-token.ts';
+import { solve } from './pow.ts';
 
 export const FREE_PREFIX = 'nightrouter/';
 /** Endereço do pool. `MULTER_FREE_URL` aponta para outro servidor, se precisar. */
-const poolUrl = () => `${(process.env.MULTER_FREE_URL || 'https://multer-builderai.vercel.app').replace(/\/+$/, '')}/api/ai/free-keys`;
+const poolBase = () => (process.env.MULTER_FREE_URL || 'https://multer-builderai.vercel.app').replace(/\/+$/, '');
+const poolUrl = () => `${poolBase()}/api/ai/free-keys`;
 const CACHE_TTL_MS = 10 * 60_000;
 const REQUEST_TIMEOUT_MS = 15_000;
 
@@ -31,6 +34,83 @@ interface Snapshot {
 }
 
 const cachePath = () => join(configDir(), 'free-keys.json');
+const tokenPath = () => join(configDir(), 'pool-token.json');
+const installPath = () => join(configDir(), 'install-id');
+
+/** Id desta instalação: o token do pool é preso nele, então copiar o token não basta. */
+function installId(): string {
+  try {
+    const saved = readFileSync(installPath(), 'utf8').trim();
+    if (/^[a-z0-9-]{8,64}$/.test(saved)) return saved;
+  } catch {
+    // ainda não existe
+  }
+  const id = randomBytes(16).toString('hex');
+  try {
+    mkdirSync(configDir(), { recursive: true, mode: 0o700 });
+    writeFileSync(installPath(), `${id}\n`, { mode: 0o600 });
+  } catch {
+    // sem arquivo o id vale só nesta execução
+  }
+  return id;
+}
+
+interface PoolToken {
+  token: string;
+  expires: number;
+}
+
+function readToken(): string | null {
+  try {
+    const value = JSON.parse(readFileSync(tokenPath(), 'utf8')) as Partial<PoolToken>;
+    if (typeof value.token !== 'string' || Number(value.expires) - Date.now() < 60_000) return null;
+    return value.token;
+  } catch {
+    return null;
+  }
+}
+
+function saveToken(value: PoolToken): void {
+  try {
+    mkdirSync(configDir(), { recursive: true, mode: 0o700 });
+    writeFileSync(tokenPath(), JSON.stringify(value), { mode: 0o600 });
+    chmodSync(tokenPath(), 0o600);
+  } catch {
+    // sem cache o token é pedido de novo na próxima
+  }
+}
+
+function forgetToken(): void {
+  try {
+    writeFileSync(tokenPath(), '', { mode: 0o600 });
+  } catch {
+    // segue sem
+  }
+}
+
+/** Resolve o desafio e troca por um token novo. `null` quando o servidor não responde. */
+async function newToken(): Promise<string | null> {
+  try {
+    const challenge = await fetch(`${poolUrl()}/challenge`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    if (!challenge.ok) return null;
+    const { nonce, bits } = await challenge.json() as { nonce?: string; bits?: number };
+    if (!nonce || !bits) return null;
+    const counter = solve(nonce, bits);
+    const response = await fetch(poolUrl(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nonce, counter, install: installId() }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS * 2),
+    });
+    if (!response.ok) return null;
+    const value = await response.json() as { token?: string; expires?: number };
+    if (!value.token) return null;
+    saveToken({ token: value.token, expires: Number(value.expires) || Date.now() + 3_600_000 });
+    return value.token;
+  } catch {
+    return null;
+  }
+}
 let snapshot: Snapshot | null = null;
 let loading: Promise<Snapshot | null> | null = null;
 
@@ -61,12 +141,20 @@ function writeCache(value: Snapshot): void {
 
 async function fetchPool(): Promise<Snapshot | null> {
   try {
-    const response = await fetch(poolUrl(), {
-      headers: { Authorization: `Bearer ${FREE_TOKEN}` },
+    let token = readToken() ?? (await newToken()) ?? FREE_TOKEN;
+    const pedir = () => fetch(poolUrl(), {
+      headers: { Authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
+    let response = await pedir();
     if (response.status === 401 || response.status === 403) {
-      throw new PoolAuthError('O servidor recusou o token do pool. Defina MULTER_FREE_TOKEN com o token novo.');
+      // Token do pool venceu: um desafio novo resolve; se nem isso, cai no token fixo.
+      forgetToken();
+      token = (await newToken()) ?? FREE_TOKEN;
+      response = await pedir();
+      if (response.status === 401 || response.status === 403) {
+        throw new PoolAuthError('O servidor recusou o acesso ao pool. Defina MULTER_FREE_TOKEN com o token novo.');
+      }
     }
     if (!response.ok) return null;
     const value = await response.json() as Partial<Snapshot>;

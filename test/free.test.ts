@@ -43,3 +43,12 @@ test('chave recusada sai do pool', async () => {
     assert.notEqual(outra, key);
   }
 });
+
+test('a prova de trabalho acha uma contagem com os bits pedidos', async () => {
+  const { solve } = await import('../src/provider/pow.ts');
+  const { createHash } = await import('node:crypto');
+  const contagem = solve('desafio', 12);
+  const digest = createHash('sha256').update(`desafio:${contagem}`).digest();
+  const bits = digest[0] === 0 ? 8 + (Math.clz32(digest[1]) - 24) : Math.clz32(digest[0]) - 24;
+  assert.ok(bits >= 12);
+});
